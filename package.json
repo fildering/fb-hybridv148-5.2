@@ -1,0 +1,14 @@
+{
+  "name": "fb-hybridv148",
+  "version": "148.5.2",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3",
+    "puppeteer": "^23.5.2",
+    "googleapis": "^140.0.0"
+  }
+}

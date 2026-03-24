@@ -18,7 +18,7 @@ const COOKIES_JSON = process.env.COOKIES_JSON || process.env.FB_COOKIE_JSON || p
 
 const MAX_POSTS_PER_GROUP = Number(process.env.MAX_POSTS_PER_GROUP || 10);
 const SCROLL_LOOPS = Number(process.env.SCROLL_LOOPS || 1); 
-const SCROLL_PAUSE_MS = Number(process.env.SCROLL_PAUSE_MS || 1000);
+const SCROLL_PAUSE_MS = Number(process.env.SCROLL_PAUSE_MS || 2000); // แนะนำ 2000 ตามที่คุยกันครับ
 
 function log(...args) {
   const now = new Date().toLocaleString("en-GB", { timeZone: TZ });
@@ -56,7 +56,14 @@ async function appendRowsToSheet(rows) {
 async function launchBrowser() {
   return puppeteer.launch({
     headless: "new",
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-zygote", "--single-process"],
+    args: [
+      "--no-sandbox", 
+      "--disable-setuid-sandbox", 
+      "--disable-dev-shm-usage", 
+      "--disable-gpu", 
+      "--no-zygote", 
+      "--single-process"
+    ],
   });
 }
 
@@ -64,7 +71,8 @@ async function newAuthedPage(browser) {
   const page = await browser.newPage();
   await page.setRequestInterception(true);
   page.on('request', (req) => {
-    if (['image', 'font', 'media'].includes(req.resourceType())) { req.abort(); } else { req.continue(); }
+    if (['image', 'font', 'media'].includes(req.resourceType())) { req.abort(); } 
+    else { req.continue(); }
   });
   await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
   if (COOKIES_JSON) {
@@ -84,25 +92,25 @@ async function scrapeGroup(page, groupUrl) {
   try {
     await page.goto(groupUrl, { waitUntil: "networkidle2", timeout: 60000 });
     
-    // ไถหน้าจอก่อน
+    // ไถหน้าจอ
     for (let i = 0; i < SCROLL_LOOPS; i++) {
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await new Promise(r => setTimeout(r, SCROLL_PAUSE_MS));
     }
 
-    // --- ส่วนที่เพิ่มเข้ามา: สั่งคลิก "ดูเพิ่มเติม" ทุกโพสต์ ---
+    // --- คลิก "ดูเพิ่มเติม" ทุกโพสต์ ---
     try {
       await page.evaluate(() => {
         const btns = Array.from(document.querySelectorAll('div[role="button"]'))
           .filter(b => b.innerText === "ดูเพิ่มเติม" || b.innerText === "See more");
         btns.forEach(b => b.click());
       });
-      // รอให้เนื้อหากางออก (ใช้เวลาอ้างอิงจาก SCROLL_PAUSE_MS ของคุณ)
-      await new Promise(r => setTimeout(r, 2000)); 
+      await new Promise(r => setTimeout(r, 2000)); // รอเนื้อหากางออก
     } catch (e) { log("⚠️ See more click error:", e.message); }
 
     if (page.url().includes("/login") || page.url().includes("checkpoint")) return { status: "login_required", rows: [] };
 
+    // --- ดึงข้อมูลแบบป้องกันข้อความซ้ำ ---
     const posts = await page.$$eval("div[role='article']", (articles) => {
       return articles.map(a => {
         const anchors = Array.from(a.querySelectorAll("a")).map(x => x.href);
@@ -110,9 +118,23 @@ async function scrapeGroup(page, groupUrl) {
         const authorEl = a.querySelector("h3 a, strong a, a[role='link']");
         const author = authorEl ? authorEl.innerText.trim() : "Unknown";
         
-        const contentEls = Array.from(a.querySelectorAll('div[data-ad-preview="message"], div[dir="auto"]'));
-        const text = contentEls.map(el => el.innerText.trim()).filter(t => t.length > 0).join("\n")
-          .replace(/ดูเพิ่มเติม/g, "").replace(/See more/g, "").trim().slice(0, 5000); 
+        // เลือกก้อนเนื้อหาจุดเดียวเพื่อกันการเบิ้ลข้อความ
+        const contentEl = a.querySelector('div[data-ad-preview="message"]');
+        let rawText = "";
+
+        if (contentEl) {
+          rawText = contentEl.innerText.trim();
+        } else {
+          // ถ้าไม่มี Selector หลัก ให้เอาอันที่ยาวที่สุดแทน (ป้องกันการวน Loop กวาดซ้ำ)
+          const fallbacks = Array.from(a.querySelectorAll('div[dir="auto"]'));
+          rawText = fallbacks.map(el => el.innerText.trim()).sort((x, y) => y.length - x.length)[0] || "";
+        }
+
+        const text = rawText
+          .replace(/ดูเพิ่มเติม/g, "")
+          .replace(/See more/g, "")
+          .trim()
+          .slice(0, 5000); 
 
         return { permalink, author, text };
       });
@@ -133,7 +155,10 @@ async function runJob() {
     const nowIso = new Date().toISOString();
     for (const g of GROUP_URLS) {
       const res = await scrapeGroup(page, g);
-      if (res.status === "login_required") break;
+      if (res.status === "login_required") {
+        log("❌ Session expired during job.");
+        break;
+      }
       res.rows.forEach(p => allRows.push([nowIso, g, p.permalink, p.author, "", p.text]));
     }
     await appendRowsToSheet(allRows);
@@ -143,6 +168,8 @@ async function runJob() {
 
 const app = express();
 app.get("/", (req, res) => res.send("Bot Active"));
+app.get("/health", (req, res) => res.json({ status: "ok" }));
+
 app.listen(process.env.PORT || 8080, () => {
   log(`Server Active`);
   cron.schedule(CRON_SCHEDULE, runJob, { timezone: TZ });

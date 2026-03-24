@@ -12,16 +12,9 @@ const SHEET_ID = process.env.SHEET_ID || process.env.GOOGLE_SHEET_ID || "";
 const SHEET_NAME = process.env.SHEET_NAME || "Raw";
 
 const RAW_GROUP_URLS = process.env.GROUP_URLS || "";
-const GROUP_URLS = RAW_GROUP_URLS
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+const GROUP_URLS = RAW_GROUP_URLS.split(",").map((s) => s.trim()).filter(Boolean);
 
-const COOKIES_JSON =
-  process.env.COOKIES_JSON ||
-  process.env.FB_COOKIE_JSON ||
-  process.env.FB_COOKIE ||
-  "";
+const COOKIES_JSON = process.env.COOKIES_JSON || process.env.FB_COOKIE_JSON || process.env.FB_COOKIE || "";
 
 const MAX_POSTS_PER_GROUP = Number(process.env.MAX_POSTS_PER_GROUP || 10);
 const SCROLL_LOOPS = Number(process.env.SCROLL_LOOPS || 1); 
@@ -36,7 +29,6 @@ function log(...args) {
 async function getSheetsClient() {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_CREDENTIALS;
   if (!raw) throw new Error("GOOGLE_CREDENTIALS not set");
-
   const key = JSON.parse(raw);
   const auth = new google.auth.GoogleAuth({
     credentials: key,
@@ -57,56 +49,32 @@ async function appendRowsToSheet(rows) {
       requestBody: { values: rows },
     });
     log(`✅ Appended ${rows.length} row(s) to Sheets`);
-  } catch (e) {
-    log("❌ Sheets Error:", e.message);
-  }
+  } catch (e) { log("❌ Sheets Error:", e.message); }
 }
 
 // -------------------- Puppeteer --------------------
 async function launchBrowser() {
   return puppeteer.launch({
     headless: "new",
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--no-zygote",
-      "--single-process"
-    ],
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-zygote", "--single-process"],
   });
 }
 
 async function newAuthedPage(browser) {
   const page = await browser.newPage();
-  
-  // ปิดการโหลดรูปภาพเพื่อประหยัด RAM บน Railway
   await page.setRequestInterception(true);
   page.on('request', (req) => {
-    if (['image', 'font', 'media'].includes(req.resourceType())) {
-      req.abort();
-    } else {
-      req.continue();
-    }
+    if (['image', 'font', 'media'].includes(req.resourceType())) { req.abort(); } else { req.continue(); }
   });
-
   await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
-
   if (COOKIES_JSON) {
     try {
-      // ล้างตัวอักษรขยะที่อาจติดมาจากการก๊อปวาง
       const cleanJson = COOKIES_JSON.replace(/[\u0000-\u001F\u007F-\u009F]/g, "").trim();
       const cookies = JSON.parse(cleanJson);
-      const fixed = (Array.isArray(cookies) ? cookies : []).map((c) => ({
-        ...c,
-        domain: c.domain || ".facebook.com",
-        path: c.path || "/",
-      }));
+      const fixed = (Array.isArray(cookies) ? cookies : []).map((c) => ({ ...c, domain: c.domain || ".facebook.com", path: c.path || "/" }));
       await page.setCookie(...fixed);
       log("✅ Cookies injected:", fixed.length);
-    } catch (e) {
-      log("❌ Cookie Parse Error:", e.message);
-    }
+    } catch (e) { log("❌ Cookie Error:", e.message); }
   }
   return page;
 }
@@ -116,31 +84,35 @@ async function scrapeGroup(page, groupUrl) {
   try {
     await page.goto(groupUrl, { waitUntil: "networkidle2", timeout: 60000 });
     
+    // ไถหน้าจอก่อน
     for (let i = 0; i < SCROLL_LOOPS; i++) {
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await new Promise(r => setTimeout(r, SCROLL_PAUSE_MS));
     }
 
-    if (page.url().includes("/login") || page.url().includes("checkpoint")) {
-      return { status: "login_required", rows: [] };
-    }
+    // --- ส่วนที่เพิ่มเข้ามา: สั่งคลิก "ดูเพิ่มเติม" ทุกโพสต์ ---
+    try {
+      await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('div[role="button"]'))
+          .filter(b => b.innerText === "ดูเพิ่มเติม" || b.innerText === "See more");
+        btns.forEach(b => b.click());
+      });
+      // รอให้เนื้อหากางออก (ใช้เวลาอ้างอิงจาก SCROLL_PAUSE_MS ของคุณ)
+      await new Promise(r => setTimeout(r, 2000)); 
+    } catch (e) { log("⚠️ See more click error:", e.message); }
 
-    // เจาะจงดึงเนื้อหาโพสต์ให้ครบถ้วนเพื่อตรวจสอบดราม่า
+    if (page.url().includes("/login") || page.url().includes("checkpoint")) return { status: "login_required", rows: [] };
+
     const posts = await page.$$eval("div[role='article']", (articles) => {
       return articles.map(a => {
         const anchors = Array.from(a.querySelectorAll("a")).map(x => x.href);
         const permalink = anchors.find(h => h.includes("/posts/") || h.includes("/permalink/")) || "";
-        
         const authorEl = a.querySelector("h3 a, strong a, a[role='link']");
         const author = authorEl ? authorEl.innerText.trim() : "Unknown";
         
-        // ดึงข้อความจากส่วน Message ของโพสต์โดยตรง
         const contentEls = Array.from(a.querySelectorAll('div[data-ad-preview="message"], div[dir="auto"]'));
-        const text = contentEls
-          .map(el => el.innerText.trim())
-          .filter(t => t.length > 0)
-          .join("\n")
-          .slice(0, 3000); // เพิ่มโควตาตัวอักษรให้ Workflow ตรวจสอบได้แม่นยำขึ้น
+        const text = contentEls.map(el => el.innerText.trim()).filter(t => t.length > 0).join("\n")
+          .replace(/ดูเพิ่มเติม/g, "").replace(/See more/g, "").trim().slice(0, 5000); 
 
         return { permalink, author, text };
       });
@@ -148,51 +120,31 @@ async function scrapeGroup(page, groupUrl) {
 
     const cleaned = posts.filter(p => p.permalink && p.text.length > 2).slice(0, MAX_POSTS_PER_GROUP);
     return { status: "ok", rows: cleaned };
-  } catch (e) {
-    log(`❌ Scrape Error ${groupUrl}:`, e.message);
-    return { status: "error", rows: [] };
-  }
+  } catch (e) { return { status: "error", rows: [] }; }
 }
 
-// -------------------- Main Job --------------------
 async function runJob() {
   log("🚀 Job Started");
   let browser;
   try {
     browser = await launchBrowser();
     const page = await newAuthedPage(browser);
-
     const allRows = [];
     const nowIso = new Date().toISOString();
-
     for (const g of GROUP_URLS) {
       const res = await scrapeGroup(page, g);
-      if (res.status === "login_required") {
-        log("❌ Session expired.");
-        break;
-      }
-      res.rows.forEach(p => {
-        allRows.push([nowIso, g, p.permalink, p.author, "", p.text]);
-      });
+      if (res.status === "login_required") break;
+      res.rows.forEach(p => allRows.push([nowIso, g, p.permalink, p.author, "", p.text]));
     }
-
     await appendRowsToSheet(allRows);
     log("🏁 Job Finished");
-  } catch (e) {
-    log("❌ Global Error:", e.message);
-  } finally {
-    if (browser) await browser.close();
-  }
+  } catch (e) { log("❌ Global Error:", e.message); } finally { if (browser) await browser.close(); }
 }
 
-// -------------------- Server --------------------
 const app = express();
-const port = process.env.PORT || 8080;
 app.get("/", (req, res) => res.send("Bot Active"));
-app.get("/health", (req, res) => res.json({ status: "ok" }));
-
-app.listen(port, () => {
-  log(`Server on port ${port}`);
+app.listen(process.env.PORT || 8080, () => {
+  log(`Server Active`);
   cron.schedule(CRON_SCHEDULE, runJob, { timezone: TZ });
   if (RUN_ON_START) runJob();
 });

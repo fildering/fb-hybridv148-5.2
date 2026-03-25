@@ -1,9 +1,8 @@
 {
-  "name": "fb-group-scraper",
-  "version": "1.0.0",
-  "description": "Facebook Group Scraper with Stealth and Screenshot Alert",
-  "main": "index.js",
+  "name": "fb-hybrid-scraper",
+  "version": "5.2.0",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },

@@ -6,13 +6,13 @@ import axios from "axios";
 import FormData from "form-data";
 
 // -------------------- Config --------------------
-const SHEET_ID = process.env.SHEET_ID || "";
+const SHEET_ID = process.env.SHEET_ID || process.env.GOOGLE_SHEET_ID || "";
 const SHEET_NAME = process.env.SHEET_NAME || "Raw";
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || "";
 const COOKIES_JSON = process.env.COOKIES_JSON || "";
 const GROUP_URLS = (process.env.GROUP_URLS || "").split(",").map(s => s.trim()).filter(Boolean);
-const TZ = "Asia/Bangkok";
-const MAX_SCROLL_ATTEMPTS = 25; 
+const TZ = process.env.TZ || "Asia/Bangkok";
+const MAX_SCROLL_ATTEMPTS = 25; // กันเหนียว ไถไม่เกิน 25 รอบถ้าหาของเก่าไม่เจอจริงๆ
 
 const randomDelay = (min, max) => new Promise(res => setTimeout(res, Math.floor(Math.random() * (max - min + 1) + min)));
 
@@ -21,42 +21,40 @@ function log(emoji, message) {
   console.log(`[${now}] ${emoji} ${message}`);
 }
 
-async function notifyError(message, screenshotBuffer = null) {
+async function notifyDiscord(message, screenshotBuffer = null) {
   if (!DISCORD_WEBHOOK_URL) return;
   try {
     const form = new FormData();
-    form.append("content", `⚠️ **บอทพัง! (Bot Alert)**\n🚨 รายละเอียด: ${message}`);
-    if (screenshotBuffer) form.append("file", screenshotBuffer, { filename: "error.png", contentType: "image/png" });
+    form.append("content", `📢 **FB Smart Scraper Alert**\n${message}`);
+    if (screenshotBuffer) form.append("file", screenshotBuffer, { filename: "alert.png", contentType: "image/png" });
     await axios.post(DISCORD_WEBHOOK_URL, form, { headers: { ...form.getHeaders() }, timeout: 30000 });
   } catch (e) { log("❌", `Discord Error: ${e.message}`); }
 }
 
-// ดึงเนื้อหาคอลัมน์ F (ข้อความรวมคอมเมนต์) มาเช็คซ้ำ
-async function getExistingContents(sheets) {
+async function getExistingLinks(sheets) {
   try {
-    const res = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!F:F` });
-    if (!res.data.values) return { set: new Set(), lastContent: null };
-    const contents = res.data.values.flat().map(c => c ? c.trim() : "").filter(Boolean);
-    return { 
-      set: new Set(contents), 
-      lastContent: contents.length > 0 ? contents[contents.length - 1] : null 
-    };
-  } catch (e) { return { set: new Set(), lastContent: null }; }
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!C:C` });
+    return res.data.values ? res.data.values.flat() : [];
+  } catch (e) { return []; }
 }
 
 async function runJob() {
-  log("🚀", "--- เริ่มงาน Smart Content-Check (ตรวจจับเม้นใหม่ + กันซ้ำ) ---");
+  log("🚀", "--- เริ่มต้นงานแบบ Smart Scroll (ไถจนกว่าจะเจอของเก่า) ---");
   let browser;
   try {
     const rawAuth = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_CREDENTIALS;
     const auth = new google.auth.GoogleAuth({ credentials: JSON.parse(rawAuth), scopes: ["https://www.googleapis.com/auth/spreadsheets"] });
     const sheets = google.sheets({ version: "v4", auth });
 
-    const { set: existingContents, lastContent } = await getExistingContents(sheets);
+    const existingLinksArray = await getExistingLinks(sheets);
+    const lastSavedLink = existingLinksArray.length > 0 ? existingLinksArray[existingLinksArray.length - 1] : null;
+    const existingLinksSet = new Set(existingLinksArray);
     
+    log("📊", lastSavedLink ? `ลิงก์ล่าสุดที่ต้องหาให้เจอ: ${lastSavedLink.slice(0, 50)}...` : "ไม่พบข้อมูลเดิม จะไถตามมาตรฐาน");
+
     browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox", "--disable-setuid-sandbox", "--incognito"] });
     const page = await browser.newPage();
-    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0");
+    await page.setUserAgent(process.env.USER_AGENT || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0");
 
     if (COOKIES_JSON) {
       const cookies = JSON.parse(COOKIES_JSON.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""));
@@ -71,56 +69,47 @@ async function runJob() {
 
       if (page.url().includes("checkpoint") || !!(await page.$('input[name="pass"]'))) {
         const screen = await page.screenshot();
-        await notifyError(`ติดด่านที่กลุ่ม: ${url}`, screen);
-        continue; 
+        await notifyDiscord(`ติดด่านที่กลุ่ม: ${url}`, screen);
+        return; 
       }
 
-      let foundOldContent = false;
+      let foundOldPost = false;
       let attempts = 0;
 
-      while (!foundOldContent && attempts < MAX_SCROLL_ATTEMPTS) {
+      log("🖱️", "กำลังเริ่มไถแบบ Smart Scroll...");
+      while (!foundOldPost && attempts < MAX_SCROLL_ATTEMPTS) {
         attempts++;
         await page.evaluate(() => window.scrollBy(0, 1000 + Math.random() * 500));
-        
-        // กางคอมเมนต์เพื่อให้ได้เนื้อหามาเช็คซ้ำแบบ Content-Based
-        await page.evaluate(() => {
-          const btns = Array.from(document.querySelectorAll('span, div[role="button"]'))
-            .filter(el => el.innerText.includes("ดูความคิดเห็น") || el.innerText.includes("ดูเพิ่ม"));
-          if (btns.length > 0) btns[0].click(); 
-        });
-
         await randomDelay(2500, 4000);
 
-        // เช็คว่าเนื้อหาโพสต์ที่เห็นตอนนี้ ซ้ำกับเนื้อหาล่าสุดใน Sheets หรือยัง
-        const pageContents = await page.$$eval("div[role='article']", (articles) => articles.map(a => a.innerText.trim()));
+        // เช็คว่าเจอลิงก์เก่าหรือยัง
+        const currentLinks = await page.$$eval("a[href*='/posts/'], a[href*='/permalink/']", (links) => links.map(l => l.href.split('?')[0]));
         
-        if (lastContent && pageContents.includes(lastContent)) {
-          log("🎯", `เจอเนื้อหาเดิมที่เคยเก็บแล้วในรอบที่ ${attempts}! หยุดไถทันที`);
-          foundOldContent = true;
-        } else if (attempts % 5 === 0) {
-          log("  ↳", `ไถไปแล้ว ${attempts} รอบ... กำลังควานหาความเคลื่อนไหวใหม่`);
+        if (lastSavedLink && currentLinks.includes(lastSavedLink.split('?')[0])) {
+          log("🎯", `เจอโพสต์เดิมที่เคยเก็บแล้วในรอบที่ ${attempts}! หยุดไถทันที`);
+          foundOldPost = true;
+        } else {
+          if (attempts % 3 === 0) log("  ↳", `ไถไปแล้ว ${attempts} รอบยังไม่เจอของเก่า...`);
         }
       }
 
-      // ดึงข้อมูลด้วย Selector ที่แม่นยำขึ้น
-      const posts = await page.$$eval("div[role='article'], div.x1yzt60o, div.x1iorvi4", (articles) => {
+      // ดึงข้อมูลโพสต์ทั้งหมดที่เจอ
+      const posts = await page.$$eval("div[role='article']", (articles) => {
         return articles.map(a => {
           const linkEl = a.querySelector("a[href*='/posts/'], a[href*='/permalink/']");
           const link = linkEl ? linkEl.href.split('?')[0] : "";
           const author = (a.querySelector("h3 span a, strong a, span[dir='auto'] a")?.innerText || "Unknown").trim();
-          const fullText = (a.innerText || "").trim();
-          return { link, author, text: fullText };
+          const text = (a.querySelector('div[dir="auto"], div.x1iorvi4')?.innerText || "").trim();
+          return { link, author, text };
         });
       });
 
-      const newPosts = posts.filter(p => p.text.length > 10 && !existingContents.has(p.text));
-      
-      const duplicateCount = posts.length - newPosts.length;
-      log("📥", `สรุปกลุ่มนี้: [ใหม่ ${newPosts.length}] | [ซ้ำ ${duplicateCount}] | [รวมที่เห็น ${posts.length}]`);
+      const newPosts = posts.filter(p => p.link && p.text.length > 5 && !existingLinksSet.has(p.link));
+      log("📥", `เจอโพสต์ใหม่ทั้งหมด ${newPosts.length} รายการ`);
       
       newPosts.forEach(p => {
         allRows.push([new Date().toLocaleString("th-TH", { timeZone: TZ }), url, p.link, p.author, "", p.text]);
-        existingContents.add(p.text);
+        existingLinksSet.add(p.link); 
       });
     }
 
@@ -130,15 +119,13 @@ async function runJob() {
         valueInputOption: "RAW", insertDataOption: "INSERT_ROWS",
         requestBody: { values: allRows },
       });
-      log("✅", `บันทึกสำเร็จ ${allRows.length} รายการ`);
+      log("✅", `บันทึกของใหม่ ${allRows.length} รายการเรียบร้อย!`);
     } else {
-      log("😴", "ไม่มีความเคลื่อนไหวใหม่");
+      log("😴", "ไม่มีของใหม่จริงๆ รอบนี้");
     }
 
-  } catch (e) { 
-    log("❌", `Error: ${e.message}`);
-    await notifyError(`บอทตาย: ${e.message}`);
-  } finally { if (browser) await browser.close(); log("🏁", "--- จบงาน ---"); }
+  } catch (e) { log("❌", `Error: ${e.message}`); }
+  finally { if (browser) await browser.close(); log("🏁", "--- จบงาน ---"); }
 }
 
 const app = express();

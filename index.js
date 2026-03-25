@@ -12,7 +12,7 @@ const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || "";
 const COOKIES_JSON = process.env.COOKIES_JSON || "";
 const GROUP_URLS = (process.env.GROUP_URLS || "").split(",").map(s => s.trim()).filter(Boolean);
 const TZ = "Asia/Bangkok";
-const MAX_SCROLL_ATTEMPTS = 25; 
+const MAX_SCROLL_ATTEMPTS = 15; // ลดลงมาหน่อยเพื่อเซฟ RAM ไม่ให้บอทปลิว
 
 const randomDelay = (min, max) => new Promise(res => setTimeout(res, Math.floor(Math.random() * (max - min + 1) + min)));
 
@@ -21,14 +21,11 @@ function log(emoji, message) {
   console.log(`[${now}] ${emoji} ${message}`);
 }
 
-async function notifyError(message, screenshotBuffer = null) {
+async function notifyError(message) {
   if (!DISCORD_WEBHOOK_URL) return;
   try {
-    const form = new FormData();
-    form.append("content", `⚠️ **บอทพัง! (Bot Alert)**\n🚨 รายละเอียด: ${message}`);
-    if (screenshotBuffer) form.append("file", screenshotBuffer, { filename: "error.png", contentType: "image/png" });
-    await axios.post(DISCORD_WEBHOOK_URL, form, { headers: { ...form.getHeaders() }, timeout: 30000 });
-  } catch (e) { log("❌", `Discord Error: ${e.message}`); }
+    await axios.post(DISCORD_WEBHOOK_URL, { content: `⚠️ **บอทพัง!**\n🚨 ${message}` });
+  } catch (e) { log("❌", "Discord Error"); }
 }
 
 async function getExistingContents(sheets) {
@@ -41,7 +38,7 @@ async function getExistingContents(sheets) {
 }
 
 async function runJob() {
-  log("🚀", "--- เริ่มงานเวอร์ชัน Deep Vision (แก้ปัญหาเห็น 0 โพสต์) ---");
+  log("🚀", "--- เริ่มรันเวอร์ชัน Stability (ป้องกัน Context Destroyed) ---");
   let browser;
   try {
     const rawAuth = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_CREDENTIALS;
@@ -49,8 +46,13 @@ async function runJob() {
     const sheets = google.sheets({ version: "v4", auth });
     const { set: existingContents, lastContent } = await getExistingContents(sheets);
     
-    browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox", "--disable-setuid-sandbox", "--incognito"] });
+    browser = await puppeteer.launch({ 
+      headless: "new", 
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"] 
+    });
+    
     const page = await browser.newPage();
+    await page.setDefaultNavigationTimeout(60000);
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0");
 
     if (COOKIES_JSON) {
@@ -61,70 +63,61 @@ async function runJob() {
     let allRows = [];
     for (const url of GROUP_URLS) {
       log("🌐", `ตรวจสอบกลุ่ม: ${url}`);
-      await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-      await randomDelay(5000, 7000);
+      try {
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+        await randomDelay(5000, 8000);
 
-      if (page.url().includes("checkpoint") || !!(await page.$('input[name="pass"]'))) {
-        const screen = await page.screenshot();
-        await notifyError(`ไอดีติดด่าน/Cookie หมดอายุที่กลุ่ม: ${url}`, screen);
-        continue; 
-      }
+        let attempts = 0;
+        let foundOldContent = false;
 
-      let foundOldContent = false;
-      let attempts = 0;
+        while (!foundOldContent && attempts < MAX_SCROLL_ATTEMPTS) {
+          attempts++;
+          await page.evaluate(() => window.scrollBy(0, 1000));
+          await randomDelay(3000, 5000);
 
-      while (!foundOldContent && attempts < MAX_SCROLL_ATTEMPTS) {
-        attempts++;
-        await page.evaluate(() => window.scrollBy(0, 1000 + Math.random() * 500));
-        
-        // กางคอมเมนต์ (กางทุกปุ่มที่เห็นในระยะสายตา)
-        await page.evaluate(async () => {
-          const btns = Array.from(document.querySelectorAll('span, div[role="button"]'))
-            .filter(el => el.innerText.includes("ดูความคิดเห็น") || el.innerText.includes("ดูเพิ่ม"));
-          for (const btn of btns) { btn.click(); await new Promise(r => setTimeout(r, 1000)); }
+          // เช็คว่า Context ยังอยู่ไหมก่อนจะกดกางเม้น
+          try {
+            await page.evaluate(() => {
+              const btns = Array.from(document.querySelectorAll('span, div[role="button"]'))
+                .filter(el => el.innerText.includes("ดูความคิดเห็น") || el.innerText.includes("ดูเพิ่ม"));
+              if (btns.length > 0) btns[0].click(); 
+            });
+          } catch (e) { log("⚠️", "หน้าเว็บขยับ/รีเฟรช ข้ามการกางเม้นรอบนี้"); }
+
+          const pageContents = await page.$$eval("div[role='article']", (articles) => articles.map(a => (a.innerText || "").trim()));
+          if (lastContent && pageContents.includes(lastContent)) {
+            log("🎯", `เจอของเดิมรอบที่ ${attempts}! หยุดไถ`);
+            foundOldContent = true;
+          } else if (attempts % 5 === 0) log("  ↳", `ไถรอบที่ ${attempts}...`);
+        }
+
+        // ดึงข้อมูล (เพิ่ม Error Handling)
+        const posts = await page.$$eval("div[role='article'], div.x1yzt60o, div.x1iorvi4", (articles) => {
+          return articles.map(a => {
+            const linkEl = a.querySelector("a[href*='/posts/'], a[href*='/permalink/']");
+            let link = linkEl ? linkEl.href.split('?')[0] : "";
+            const author = (a.querySelector("h3 span a, strong a")?.innerText || "Unknown").trim();
+            return { link, author, text: (a.innerText || "").trim() };
+          });
         });
 
-        await randomDelay(3000, 5000);
-        const pageContents = await page.$$eval("div[role='article']", (articles) => articles.map(a => (a.innerText || "").trim()));
+        const newPosts = posts.filter(p => p.text.length > 10 && !existingContents.has(p.text));
+        log("📥", `กลุ่มนี้: [ใหม่ ${newPosts.length}] | [ซ้ำ ${posts.length - newPosts.length}] | [รวมที่เห็น ${posts.length}]`);
         
-        if (lastContent && pageContents.includes(lastContent)) {
-          log("🎯", `เจอเนื้อหาเดิมที่เคยเก็บแล้วในรอบที่ ${attempts}! หยุดไถทันที`);
-          foundOldContent = true;
-        } else if (attempts % 5 === 0) log("  ↳", `ไถรอบที่ ${attempts}... กำลังควานหาโพสต์ใหม่`);
-      }
-
-      // --- 🔥 ไม้ตาย: Deep Selector เพื่อดึงข้อมูล ---
-      await randomDelay(5000, 8000); // หยุดรอให้หน้าเว็บนิ่งก่อนดึง
-      const posts = await page.$$eval("div[role='article'], div[data-ad-preview='subject'], div.x1yzt60o, div.x1iorvi4", (articles) => {
-        return articles.map(a => {
-          const linkEl = a.querySelector("a[href*='/posts/'], a[href*='/permalink/'], a[aria-label*='นาที'], a[aria-label*='ชั่วโมง'], a[aria-label*='วัน']");
-          let link = linkEl ? linkEl.href.split('?')[0] : "";
-          if (link.endsWith('/')) link = link.slice(0, -1);
-          const authorEl = a.querySelector("h3 span a, strong a, span[dir='auto'] a");
-          const author = authorEl ? authorEl.innerText.trim() : "Unknown";
-          const fullText = (a.innerText || "").trim();
-          return { link, author, text: fullText };
+        newPosts.forEach(p => {
+          allRows.push([new Date().toLocaleString("th-TH", { timeZone: TZ }), url, p.link, p.author, "", p.text]);
+          existingContents.add(p.text);
         });
-      });
-
-      const newPosts = posts.filter(p => p.text.length > 10 && !existingContents.has(p.text));
-      log("📥", `กลุ่มนี้: [ใหม่ ${newPosts.length}] | [ซ้ำ ${posts.length - newPosts.length}] | [รวมที่เห็น ${posts.length}]`);
-      
-      newPosts.forEach(p => {
-        allRows.push([new Date().toLocaleString("th-TH", { timeZone: TZ }), url, p.link, p.author, "", p.text]);
-        existingContents.add(p.text);
-      });
+      } catch (err) { log("❌", `ข้ามกลุ่ม ${url} เนื่องจากหน้าเว็บรวน`); }
     }
 
     if (allRows.length > 0) {
       await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A:Z`, valueInputOption: "RAW", insertDataOption: "INSERT_ROWS", requestBody: { values: allRows } });
-      log("✅", `อัปเดตสำเร็จ ${allRows.length} รายการ`);
-    } else log("😴", "รอบนี้ยังไม่เจอความเคลื่อนไหวใหม่");
+      log("✅", `อัปเดต ${allRows.length} รายการ`);
+    }
 
-  } catch (e) { 
-    log("❌", e.message);
-    await notifyError(`บอทตาย: ${e.message}`);
-  } finally { if (browser) await browser.close(); log("🏁", "--- จบงาน ---"); }
+  } catch (e) { await notifyError(`บอทตาย: ${e.message}`); }
+  finally { if (browser) await browser.close(); log("🏁", "จบงาน"); }
 }
 
 const app = express();

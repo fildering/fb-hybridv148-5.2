@@ -1,15 +1,18 @@
 {
-  "name": "fb-hybridv148",
-  "version": "148.5.2",
+  "name": "fb-group-scraper",
+  "version": "1.0.0",
+  "description": "Facebook Group Scraper with Stealth and Screenshot Alert",
+  "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
+    "axios": "^1.6.0",
+    "express": "^4.18.2",
+    "form-data": "^4.0.0",
+    "googleapis": "^126.0.0",
     "node-cron": "^3.0.3",
-    "puppeteer": "^23.5.2",
-    "googleapis": "^140.0.0",
-    "axios": "^1.6.0"
+    "puppeteer": "^21.5.0"
   }
 }

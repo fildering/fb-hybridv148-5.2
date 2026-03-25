@@ -5,112 +5,56 @@ import { google } from "googleapis";
 import axios from "axios";
 import FormData from "form-data";
 
-// -------------------- Configuration --------------------
-const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "*/20 * * * *";
-const RUN_ON_START = (process.env.RUN_ON_START || "true").toLowerCase() === "true";
-const TZ = process.env.TZ || "Asia/Bangkok";
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || ""; 
-
+// -------------------- Config --------------------
 const SHEET_ID = process.env.SHEET_ID || process.env.GOOGLE_SHEET_ID || "";
 const SHEET_NAME = process.env.SHEET_NAME || "Raw";
-const GROUP_URLS = (process.env.GROUP_URLS || "").split(",").map(s => s.trim()).filter(Boolean);
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || "";
 const COOKIES_JSON = process.env.COOKIES_JSON || "";
+const GROUP_URLS = (process.env.GROUP_URLS || "").split(",").map(s => s.trim()).filter(Boolean);
+const SCROLL_LOOPS = 5; // ไถ 5 รอบเพื่อให้เก็บโพสต์ 3 และ 4 ได้ครบ
 
-const randomDelay = (min = 2000, max = 5000) => {
-  const ms = Math.floor(Math.random() * (max - min + 1) + min);
-  return new Promise(res => setTimeout(res, ms));
-};
+const randomDelay = (min = 2000, max = 5000) => new Promise(res => setTimeout(res, Math.floor(Math.random() * (max - min + 1) + min)));
 
 function log(...args) {
-  const now = new Date().toLocaleString("en-GB", { timeZone: TZ });
-  console.log(`[${now}]`, ...args);
+  console.log(`[${new Date().toLocaleString("th-TH")}]`, ...args);
 }
 
-// --- ระบบแจ้งเตือน Discord แบบแนบรูป ---
+// --- ระบบแจ้งเตือน Discord (เน้นส่งรูปให้ชัวร์) ---
 async function notifyDiscord(message, screenshotBuffer = null) {
   if (!DISCORD_WEBHOOK_URL) return;
   try {
     const form = new FormData();
-    form.append("content", `🚨 **FB Bot Alert**\n> ${message}`);
+    form.append("content", `📢 **FB Scraper Alert**\n${message}`);
     if (screenshotBuffer) {
-      form.append("file", screenshotBuffer, { filename: "status.png", contentType: "image/png" });
+      form.append("file", screenshotBuffer, { filename: "alert.png", contentType: "image/png" });
     }
-    await axios.post(DISCORD_WEBHOOK_URL, form, { headers: { ...form.getHeaders() } });
-    log("📸 ส่งแจ้งเตือนพร้อมรูปไป Discord แล้ว");
+    await axios.post(DISCORD_WEBHOOK_URL, form, { 
+      headers: { ...form.getHeaders() },
+      timeout: 30000 // ให้เวลาส่งรูป 30 วินาที
+    });
+    log("📸 ส่งรูปหลักฐานไป Discord เรียบร้อย");
   } catch (e) { log("❌ Discord Error:", e.message); }
 }
 
-async function launchBrowser() {
-  return puppeteer.launch({
-    headless: "new",
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--incognito", "--disable-blink-features=AutomationControlled"]
-  });
-}
-
-async function scrapeGroup(page, groupUrl) {
-  log("🔍 กำลังเข้ากลุ่ม:", groupUrl);
+async function getExistingLinks(sheets) {
   try {
-    await page.goto(groupUrl, { waitUntil: "networkidle2", timeout: 60000 });
-    await randomDelay(3000, 5000); 
-
-    // เช็คหน้าด่าน Checkpoint/Login
-    const isLocked = await page.evaluate(() => {
-      return window.location.href.includes("checkpoint") || !!document.querySelector('input[name="pass"]');
-    });
-
-    if (isLocked) {
-      log("⚠️ ติดด่านตรวจ! กำลังแคปหน้าจอ...");
-      const screen = await page.screenshot();
-      await notifyDiscord(`ติดหน้ายืนยันตัวตนที่กลุ่ม: ${groupUrl}`, screen);
-      
-      // พยายามกดปุ่มทะลวงด่าน
-      await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('div[role="button"], button'))
-          .filter(b => b.innerText.includes("ดำเนินการต่อ") || b.innerText.includes("Continue"));
-        if (btns.length > 0) btns[0].click();
-      });
-      await randomDelay(5000, 8000);
-      return { status: "checkpoint", rows: [] };
-    }
-
-    // --- พฤติกรรมสุ่ม (Scroll & Expand) ---
-    await page.evaluate(() => window.scrollBy(0, 500 + Math.random() * 500));
-    await randomDelay(2000, 4000);
-    
-    // กางคอมเมนต์ (สุ่มคลิก)
-    await page.evaluate(() => {
-      const more = Array.from(document.querySelectorAll('span')).find(s => s.innerText.includes("ดูความคิดเห็น"));
-      if (more) more.click();
-    });
-    await randomDelay(3000, 5000);
-
-    // ดึงข้อมูลโพสต์
-    const posts = await page.$$eval("div[role='article']", (articles) => {
-      return articles.map(a => {
-        const link = a.querySelector("a[href*='/posts/'], a[href*='/permalink/']")?.href || "";
-        const author = (a.querySelector("h3 span a")?.innerText || "Unknown").trim();
-        const text = (a.querySelector('div[dir="auto"]')?.innerText || "").slice(0, 5000);
-        return { link, author, text };
-      });
-    });
-
-    return { status: "ok", rows: posts.filter(p => p.link && p.text.length > 5) };
-  } catch (e) {
-    const errScreen = await page.screenshot().catch(() => null);
-    await notifyDiscord(`Error ระหว่างทำงาน: ${e.message}`, errScreen);
-    return { status: "error", rows: [] };
-  }
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!C:C` });
+    return new Set(res.data.values ? res.data.values.flat() : []);
+  } catch (e) { return new Set(); }
 }
 
 async function runJob() {
-  log("🚀 เริ่มต้นการทำงานแบบ Stealth Mode");
+  log("🚀 เริ่มต้นงาน (ระบบส่งรูป + เช็คซ้ำ + ไถ 5 รอบ)");
   let browser;
   try {
-    browser = await launchBrowser();
+    const rawAuth = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_CREDENTIALS;
+    const auth = new google.auth.GoogleAuth({ credentials: JSON.parse(rawAuth), scopes: ["https://www.googleapis.com/auth/spreadsheets"] });
+    const sheets = google.sheets({ version: "v4", auth });
+
+    const existingLinks = await getExistingLinks(sheets);
+    browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox", "--disable-setuid-sandbox", "--incognito"] });
     const page = await browser.newPage();
-    const ua = process.env.USER_AGENT || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0";
-    await page.setUserAgent(ua);
-    log("👤 ใช้ User-Agent:", ua.slice(0, 50) + "...");
+    await page.setUserAgent(process.env.USER_AGENT || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0");
 
     if (COOKIES_JSON) {
       const cookies = JSON.parse(COOKIES_JSON.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""));
@@ -118,38 +62,56 @@ async function runJob() {
     }
 
     let allRows = [];
-    const nowIso = new Date().toISOString();
-    
-    for (const g of GROUP_URLS) {
-      const res = await scrapeGroup(page, g);
-      res.rows.forEach(p => allRows.push([nowIso, g, p.link, p.author, "", p.text]));
-      if (res.status === "checkpoint") break;
-      await randomDelay(4000, 8000);
+    for (const url of GROUP_URLS) {
+      log("🔍 เข้ากลุ่ม:", url);
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+      await randomDelay(3000, 5000);
+
+      // --- จุดเช็คหน้าด่านและแคปรูป ---
+      if (page.url().includes("checkpoint") || !!(await page.$('input[name="pass"]'))) {
+        log("⚠️ ติดด่านตรวจ! กำลังแคปรูป...");
+        const screen = await page.screenshot();
+        await notifyDiscord(`บอทติดด่านที่กลุ่ม: ${url}\nพี่ฟิวส์เช็ค Cookie ด่วนครับ!`, screen);
+        await randomDelay(5000, 8000); // รอให้ส่งรูปเสร็จก่อนปิด
+        return; // ออกจากงานทันที
+      }
+
+      // ไถลึก 5 รอบตามสั่ง
+      for (let i = 0; i < SCROLL_LOOPS; i++) {
+        await page.evaluate(() => window.scrollBy(0, 800 + Math.random() * 400));
+        await randomDelay(2000, 4000);
+      }
+
+      const posts = await page.$$eval("div[role='article']", (articles) => {
+        return articles.map(a => {
+          const link = a.querySelector("a[href*='/posts/'], a[href*='/permalink/']")?.href || "";
+          const author = (a.querySelector("h3 span a, strong a")?.innerText || "Unknown").trim();
+          const text = (a.querySelector('div[dir="auto"]')?.innerText || "").slice(0, 5000);
+          return { link, author, text };
+        });
+      });
+
+      const newPosts = posts.filter(p => p.link && p.text.length > 5 && !existingLinks.has(p.link));
+      newPosts.forEach(p => {
+        allRows.push([new Date().toISOString(), url, p.link, p.author, "", p.text]);
+        existingLinks.add(p.link);
+      });
     }
 
-    // --- ส่วนแก้ไข: บันทึกลง Sheets เฉพาะเมื่อมีข้อมูลเท่านั้น เพื่อกัน Error ---
-    if (allRows.length > 0 && SHEET_ID) {
-      const rawAuth = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_CREDENTIALS;
-      const auth = new google.auth.GoogleAuth({ credentials: JSON.parse(rawAuth), scopes: ["https://www.googleapis.com/auth/spreadsheets"] });
-      const sheets = google.sheets({ version: "v4", auth });
+    if (allRows.length > 0) {
       await sheets.spreadsheets.values.append({
-        spreadsheetId: SHEET_ID,
-        range: `${SHEET_NAME}!A:Z`,
-        valueInputOption: "RAW",
-        insertDataOption: "INSERT_ROWS",
+        spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A:Z`,
+        valueInputOption: "RAW", insertDataOption: "INSERT_ROWS",
         requestBody: { values: allRows },
       });
-      log(`✅ บันทึกข้อมูลเรียบร้อย ${allRows.length} รายการ`);
-    } else {
-      log("⚠️ ไม่มีข้อมูลใหม่ให้บันทึก (อาจติดหน้าด่านหรือไม่มีโพสต์ใหม่)");
+      log(`✅ บันทึกโพสต์ใหม่ ${allRows.length} รายการ`);
     }
-  } catch (e) { log("❌ Global Error:", e.message); }
-  finally { if (browser) await browser.close(); log("🏁 จบการทำงานรอบนี้"); }
+  } catch (e) { log("❌ Error:", e.message); }
+  finally { if (browser) await browser.close(); log("🏁 จบงาน"); }
 }
 
 const app = express();
-app.get("/", (req, res) => res.send("Bot Active"));
 app.listen(process.env.PORT || 8080, () => {
-  cron.schedule(CRON_SCHEDULE, runJob, { timezone: TZ });
-  if (RUN_ON_START) runJob();
+  cron.schedule(process.env.CRON_SCHEDULE || "*/20 * * * *", runJob);
+  if (process.env.RUN_ON_START === "true") runJob();
 });

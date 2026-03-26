@@ -102,9 +102,13 @@ async function runJob() {
 
 // -------------------- Express Server --------------------
 const app = express();
-app.get("/", (req, res) => res.send("<h1>Bot Active</h1><p>เข้าดูหน้าจอกดรหัสได้ที่ <a href='/debugger'>/debugger</a></p>"));
-app.listen(process.env.PORT || 3000, () => {
-  log("📶", `Server standby on port ${process.env.PORT || 3000}`);
-  cron.schedule("*/20 * * * *", runJob); // รันทุก 20 นาที
+app.get("/", (req, res) => res.send("Bot Active - ดูหน้าจอที่ /debugger"));
+
+// 🔥 แก้ตรงนี้: ให้บอทรันที่ 8080 เพื่อไม่ให้ทับกับหน้าจอที่ 3000
+const BOT_PORT = 8080; 
+
+app.listen(BOT_PORT, "0.0.0.0", () => {
+  log("📶", `ตัวควบคุมบอท Standby ที่ Port: ${BOT_PORT}`);
+  cron.schedule("*/20 * * * *", runJob);
   if (process.env.RUN_ON_START === "true") runJob();
 });

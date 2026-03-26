@@ -12,6 +12,7 @@ async function runJob() {
   log("🚀", "--- เริ่มงานโหมดรีโมท (Interactive Mode) ---");
   let browser;
   try {
+    // 🔥 ต่อเข้าหน้าจอหลัก
     browser = await puppeteer.connect({
       browserWSEndpoint: `ws://localhost:3000?--window-size=1280,900`,
       defaultViewport: null
@@ -37,11 +38,15 @@ async function runJob() {
   finally { if (browser) await browser.disconnect(); }
 }
 
+// ---------------------------------------------------------
+// 💡 ส่วนของ Express (วางไว้ล่างสุด)
+// ---------------------------------------------------------
 const app = express();
-// 🔥 บรรทัดนี้แหละที่แก้ (เพิ่ม req เข้าไป)
-app.get("/", (req, res) => res.send("Active - ดูหน้าจอที่ /debugger"));
+// ไม่ต้องดักหน้าแรกเยอะ ปล่อยให้ระบบ Docker คุม /debugger เอง
+app.get("/status", (req, res) => res.send("Bot is running"));
 
-app.listen(process.env.PORT || 3000, () => {
+app.listen(8080, () => { // 👈 ให้ Express ไปใช้พอร์ต 8080 แทน 3000 ไม่ให้แย่งกัน
+  log("📡", "Express Server standby on port 8080");
   cron.schedule("*/20 * * * *", runJob);
   if (process.env.RUN_ON_START === "true") runJob();
 });

@@ -27,9 +27,9 @@ async function runJob() {
         sheets = google.sheets({ version: "v4", auth });
     }
 
-    // เกาะไปที่หน้าจอ Browserless + ตั้ง keepalive 120000 (2 นาที) เพื่อไม่ให้ session ถูกตัดทิ้งระหว่างที่คุณเข้าไปแก้
+    // เกาะไปที่หน้าจอ Browserless (เอา keepalive ออกแล้ว เพื่อไม่ให้ Error 400)
     browser = await puppeteer.connect({
-      browserWSEndpoint: `ws://localhost:3000?--window-size=1280,900&keepalive=120000`,
+      browserWSEndpoint: `ws://localhost:3000?--window-size=1280,900`,
       defaultViewport: null
     });
 

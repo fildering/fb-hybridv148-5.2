@@ -3,6 +3,9 @@ FROM ghcr.io/browserless/chromium:latest
 ENV ENABLE_DEBUGGER=true
 ENV PORT=3000
 
+# 🔥 จุดแก้บัค: สร้างไฟล์ .env เปล่าๆ หลอกระบบหน้าจอไม่ให้มันแครช
+RUN touch /usr/src/app/.env
+
 # แยกห้องให้บอทมาอยู่ที่โฟลเดอร์ /bot (จะได้ไม่ทับระบบหน้าจอ)
 WORKDIR /bot
 COPY package*.json ./
@@ -10,7 +13,7 @@ RUN npm install
 COPY index.js ./
 COPY start.sh ./
 
-# กันเหนียวเรื่องบรรทัดเว้นวรรคเผื่อสร้างไฟล์จาก Windows
+# กันเหนียวเรื่องบรรทัดเว้นวรรคเผื่อสร้างไฟล์จาก windows
 RUN sed -i 's/\r$//' start.sh
 RUN chmod +x start.sh
 

@@ -9,12 +9,11 @@ const SHEET_NAME = process.env.SHEET_NAME || "Raw";
 const GROUP_URLS = (process.env.GROUP_URLS || "").split(",").map(s => s.trim()).filter(Boolean);
 const COOKIES_JSON = process.env.COOKIES_JSON || "";
 const TZ = "Asia/Bangkok";
-const SCROLL_COUNT = 15; // จำนวนรอบที่ไถหน้าจอลงล่าง
+const SCROLL_COUNT = 15; 
 
 const log = (emoji, message) => console.log(`[${new Date().toLocaleString("th-TH", { timeZone: TZ })}] ${emoji} ${message}`);
 const randomDelay = (min, max) => new Promise(res => setTimeout(res, Math.floor(Math.random() * (max - min + 1) + min)));
 
-// ฟังก์ชันดึงข้อมูลล่าสุดจาก Sheets เพื่อเช็คซ้ำ (Deduplicate)
 async function getRecentContents(sheets) {
   try {
     const res = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!F:F` });
@@ -24,12 +23,11 @@ async function getRecentContents(sheets) {
 }
 
 async function runJob() {
-  log("🚀", "--- เริ่มงาน: Hybrid Scraper (ไถเอง + พี่กดเอง) ---");
+  log("🚀", "--- เริ่มงาน: Full Hybrid Scraper (Auto-Rescue + Remote) ---");
   let browser;
   let retryCount = 0;
   const maxRetries = 5;
 
-  // 🔥 ระบบ Retry: พยายามเชื่อมต่อหน้าจอ Docker (กัน Error ECONNREFUSED)
   while (retryCount < maxRetries) {
     try {
       browser = await puppeteer.connect({
@@ -40,27 +38,22 @@ async function runJob() {
       break; 
     } catch (err) {
       retryCount++;
-      log("⏳", `ยังเชื่อมหน้าจอไม่ได้ (รอบที่ ${retryCount}/${maxRetries}) รอ 5 วินาที...`);
+      log("⏳", `รอหน้าจอพร้อม (รอบที่ ${retryCount}/${maxRetries})...`);
       await new Promise(res => setTimeout(res, 5000));
     }
   }
 
-  if (!browser) {
-    log("💀", "เชื่อมต่อหน้าจอไม่ได้ถาวร หยุดงานรอบนี้");
-    return;
-  }
+  if (!browser) return log("💀", "เชื่อมต่อหน้าจอไม่ได้ หยุดงาน");
 
   try {
     const rawAuth = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_CREDENTIALS;
     const auth = new google.auth.GoogleAuth({ credentials: JSON.parse(rawAuth), scopes: ["https://www.googleapis.com/auth/spreadsheets"] });
     const sheets = google.sheets({ version: "v4", auth });
     const existingContents = await getRecentContents(sheets);
-
     const page = await browser.newPage();
+
     if (COOKIES_JSON) {
-      try {
-        await page.setCookie(...JSON.parse(COOKIES_JSON));
-      } catch (e) { log("⚠️", "รูปแบบ Cookie JSON ไม่ถูกต้อง"); }
+      try { await page.setCookie(...JSON.parse(COOKIES_JSON)); } catch (e) { log("⚠️", "Cookie ผิดรูปแบบ"); }
     }
 
     let allRows = [];
@@ -69,16 +62,33 @@ async function runJob() {
       await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
       await randomDelay(5000, 8000);
 
-      // --- 🛠️ ส่วนเช็คหน้ากั้น (ถ้า 0 โพสต์ ให้พี่รีโมทเข้าไปกดเอง) ---
-      const postsCount = await page.evaluate(() => document.querySelectorAll("div[role='article']").length);
+      // --- 🛠️ ส่วนกู้ชีพ: พยายามกด Continue เองก่อนจอดรอ ---
+      let postsCount = await page.evaluate(() => document.querySelectorAll("div[role='article']").length);
+      
       if (postsCount === 0) {
-        log("🛑", "ตรวจพบหน้ากั้น! บอทจะจอดรอ 2 นาที ให้พี่เปิด /debugger ไปกดให้ผ่าน...");
+        log("🔍", "ไม่พบโพสต์... พยายามแก้หน้ากั้น Continue อัตโนมัติ");
+        const autoClicked = await page.evaluate(() => {
+          const keywords = ["Continue", "ดำเนินการต่อ", "ใช่", "ตกลง"];
+          const btns = Array.from(document.querySelectorAll('div[role="button"], span, a, button'));
+          const target = btns.find(b => keywords.some(k => b.innerText.includes(k)));
+          if (target) { target.click(); return true; }
+          return false;
+        });
+
+        if (autoClicked) {
+          log("🖱️", "บอทกดปุ่มให้แล้ว! รอโหลด 15 วินาที...");
+          await randomDelay(15000, 20000);
+          postsCount = await page.evaluate(() => document.querySelectorAll("div[role='article']").length);
+        }
+      }
+
+      // --- 🛑 ถ้ายัง 0 โพสต์อยู่ ให้พี่รีโมทเข้ามาจิ้มเอง ---
+      if (postsCount === 0) {
+        log("🛑", "ยังติดหน้ากั้น! บอทจะจอดรอ 2 นาที ให้พี่เปิด /debugger ไปกดเอง...");
         await new Promise(res => setTimeout(res, 120000)); 
       }
 
-      log("✅", "เริ่มกระบวนการไถหน้าจอ (Auto Scroll & Expand)...");
-
-      // --- 🛠️ ส่วน Scraping Logic (ไถหน้าจอเหมือนเวอร์ชันเดิมที่พี่ชอบ) ---
+      log("✅", "เริ่มกระบวนการไถหน้าจอ...");
       for (let i = 1; i <= SCROLL_COUNT; i++) {
         await page.evaluate(() => window.scrollBy(0, 1000));
         const clicked = await page.evaluate(async () => {
@@ -88,60 +98,39 @@ async function runJob() {
           return btns.length;
         });
         await randomDelay(3000, 4000);
-        log(" ↳", `ไถรอบที่ ${i}: [กางปุ่มเพิ่ม: ${clicked}]`);
+        log(" ↳", `ไถรอบที่ ${i}: [กางปุ่ม: ${clicked}]`);
       }
 
-      // ดึงข้อมูลและล้างคำขยะ (Junk Words)
       const finalPosts = await page.$$eval("div[role='article']", (articles) => {
         return articles.map(a => {
           const link = a.querySelector("a[href*='/posts/'], a[href*='/permalink/']")?.href.split('?')[0] || "";
           const author = a.querySelector("h3 span a, strong a")?.innerText.trim() || "Unknown";
           let txt = a.innerText.trim();
           const junk = ["ถูกใจ", "แชร์", "ตอบกลับ", "ส่ง", "เขียนความคิดเห็น..."];
-          junk.forEach(w => { 
-            const regex = new RegExp(`^${w}$|^${w}\\n|\\n${w}$|\\n${w}\\n`, 'gm'); 
-            txt = txt.replace(regex, "\n"); 
-          });
+          junk.forEach(w => { const regex = new RegExp(`^${w}$|^${w}\\n|\\n${w}$|\\n${w}\\n`, 'gm'); txt = txt.replace(regex, "\n"); });
           return { link, author, text: txt.replace(/\n\s*\n/g, '\n').trim() };
         });
       });
 
-      // กรองเฉพาะโพสต์ใหม่
-      const newToSave = finalPosts.filter(p => p.text.length > 10 && !existingContents.has(p.text));
-      newToSave.forEach(p => {
+      const newItems = finalPosts.filter(p => p.text.length > 10 && !existingContents.has(p.text));
+      newItems.forEach(p => {
         allRows.push([new Date().toLocaleString("th-TH", { timeZone: TZ }), url, p.link, p.author, "", p.text]);
         existingContents.add(p.text);
       });
     }
 
-    // บันทึกลง Google Sheets
     if (allRows.length > 0) {
-      await sheets.spreadsheets.values.append({ 
-        spreadsheetId: SHEET_ID, 
-        range: `${SHEET_NAME}!A:A`, 
-        valueInputOption: "RAW", 
-        insertDataOption: "INSERT_ROWS", 
-        requestBody: { values: allRows } 
-      });
-      log("✅", `บันทึกข้อมูลใหม่สำเร็จ ${allRows.length} รายการ`);
+      await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A:A`, valueInputOption: "RAW", insertDataOption: "INSERT_ROWS", requestBody: { values: allRows } });
+      log("✅", `บันทึกข้อมูลใหม่ ${allRows.length} รายการ`);
     }
-
-  } catch (e) { 
-    log("💀", `Error: ${e.message}`); 
-  } finally { 
-    if (browser) await browser.disconnect(); 
-    log("🏁", "จบงานรอบนี้"); 
-  }
+  } catch (e) { log("💀", `Error: ${e.message}`); }
+  finally { if (browser) await browser.disconnect(); log("🏁", "จบงาน"); }
 }
 
-// -------------------- Express Server --------------------
 const app = express();
 app.get("/", (req, res) => res.send("<h1>Bot Active</h1><p>เข้าดูหน้าจอกดรหัสได้ที่ <a href='/debugger'>/debugger</a></p>"));
-
-// 🔥 รันที่ Port 8080 เพื่อไม่ให้ทับกับ Browserless (3000)
-const BOT_PORT = 8080; 
-app.listen(BOT_PORT, "0.0.0.0", () => {
-  log("📶", `ตัวควบคุมบอท Standby ที่ Port: ${BOT_PORT}`);
+app.listen(8080, "0.0.0.0", () => {
+  log("📶", "ตัวควบคุมบอท Standby ที่ Port 8080");
   cron.schedule("*/20 * * * *", runJob);
   if (process.env.RUN_ON_START === "true") runJob();
 });

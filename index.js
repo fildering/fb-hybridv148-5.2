@@ -12,7 +12,6 @@ async function runJob() {
   log("🚀", "--- เริ่มงานโหมดรีโมท (Interactive Mode) ---");
   let browser;
   try {
-    // 🔥 แก้ตรงนี้: ต้องใช้ connect ไปที่พอร์ต 3000 เพื่อให้ภาพออกหน้าจอ debugger
     browser = await puppeteer.connect({
       browserWSEndpoint: `ws://localhost:3000?--window-size=1280,900`,
       defaultViewport: null
@@ -39,7 +38,9 @@ async function runJob() {
 }
 
 const app = express();
-app.get("/", (res) => res.send("Active - ดูหน้าจอที่ /debugger"));
+// 🔥 บรรทัดนี้แหละที่แก้ (เพิ่ม req เข้าไป)
+app.get("/", (req, res) => res.send("Active - ดูหน้าจอที่ /debugger"));
+
 app.listen(process.env.PORT || 3000, () => {
   cron.schedule("*/20 * * * *", runJob);
   if (process.env.RUN_ON_START === "true") runJob();

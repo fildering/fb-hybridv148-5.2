@@ -3,52 +3,59 @@ import express from "express";
 import puppeteer from "puppeteer";
 import { google } from "googleapis";
 
+// --- Config ---
 const SHEET_ID = process.env.SHEET_ID || "";
+const SHEET_NAME = process.env.SHEET_NAME || "Raw";
 const GROUP_URLS = (process.env.GROUP_URLS || "").split(",").map(s => s.trim()).filter(Boolean);
 const COOKIES_JSON = process.env.COOKIES_JSON || "";
+const TZ = "Asia/Bangkok";
 
-const log = (emoji, message) => console.log(`[${new Date().toLocaleString("th-TH")}] ${emoji} ${message}`);
+const log = (emoji, message) => console.log(`[${new Date().toLocaleString("th-TH", { timeZone: TZ })}] ${emoji} ${message}`);
 
 async function runJob() {
   log("🚀", "--- เริ่มงานโหมดรีโมท (Interactive Mode) ---");
   let browser;
   try {
-    // เชื่อมต่อไปยังเบราว์เซอร์ที่มีหน้าจอในตัว Docker เอง
-    browser = await puppeteer.launch({
-      headless: false, // 💡 ต้องเป็น false เพื่อให้พี่มองเห็นหน้าจอ
-      args: ["--no-sandbox", "--window-size=1280,900"]
+    const rawAuth = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_CREDENTIALS;
+    const auth = new google.auth.GoogleAuth({ credentials: JSON.parse(rawAuth), scopes: ["https://www.googleapis.com/auth/spreadsheets"] });
+    const sheets = google.sheets({ version: "v4", auth });
+
+    // 💡 หัวใจสำคัญ: เชื่อมต่อผ่าน WebSocket เพื่อให้ภาพออกหน้าจอ /debugger
+    browser = await puppeteer.connect({
+      browserWSEndpoint: `ws://localhost:3000?--window-size=1280,900`,
+      defaultViewport: null
     });
 
     const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 900 });
-
+    
     if (COOKIES_JSON) {
       const cookies = JSON.parse(COOKIES_JSON);
       await page.setCookie(...cookies);
     }
 
     for (const url of GROUP_URLS) {
-      log("🌐", `เปิดกลุ่ม: ${url}`);
-      await page.goto(url, { waitUntil: "networkidle2" });
+      log("🌐", `กำลังเปิดกลุ่ม: ${url}`);
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
-      // --- 🛑 จุดพักรอพี่ฟิวส์ ---
-      // ถ้าบอทนับโพสต์ได้ 0 มันจะหยุดรอ 1 นาที เพื่อให้พี่รีโมทเข้าไปกด
+      // เช็คว่าติดหน้ากั้นไหม
       const posts = await page.$$("div[role='article']");
       if (posts.length === 0) {
-        log("⚠️", "ติดหน้ากั้น! พี่ฟิวส์มีเวลา 2 นาทีในการรีโมทเข้าไปกดให้ผ่าน...");
-        await new Promise(res => setTimeout(res, 120000)); // รอนิ่งๆ 2 นาที
+        log("🛑", "ตรวจพบหน้ากั้น! บอทจะจอดรอ 2 นาที ให้พี่รีโมทเข้าไปกดให้ผ่าน...");
+        // จอดรอให้พี่ฟิวส์เข้าไปจัดการในหน้าจอรีโมท
+        await new Promise(res => setTimeout(res, 120000)); 
       }
 
-      // ... (โค้ดส่วนไถงานและบันทึก Sheets เหมือนเดิม) ...
-      log("✅", "เริ่มดึงข้อมูล...");
+      log("✅", "เข้าหน้ากลุ่มได้แล้ว (หรือพี่กดให้ผ่านแล้ว) เริ่มทำงานต่อ...");
+      // ... (โค้ดส่วนไถหน้าจอและบันทึกลง Sheets ใส่ต่อตรงนี้) ...
     }
-  } catch (e) { log("💀", e.message); }
-  finally { if (browser) await browser.close(); }
+
+  } catch (e) { log("💀", `Error: ${e.message}`); }
+  finally { if (browser) await browser.disconnect(); log("🏁", "จบงานรอบนี้"); }
 }
 
-// ตั้ง Server หน้าบ้าน
 const app = express();
-app.get("/", (req, res) => res.send("บอทรันอยู่... เข้าดูหน้าจอได้ที่ Port 3000/debugger"));
-app.listen(process.env.PORT || 8080, () => {
+app.get("/", (req, res) => res.send("System Active - เข้าดูหน้าจอที่ /debugger"));
+app.listen(process.env.PORT || 3000, () => {
   cron.schedule("*/20 * * * *", runJob);
+  if (process.env.RUN_ON_START === "true") runJob();
 });

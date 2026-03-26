@@ -17,7 +17,6 @@ const SCROLL_COUNT = 15;
 const log = (emoji, message) => console.log(`[${new Date().toLocaleString("th-TH", { timeZone: TZ })}] ${emoji} ${message}`);
 const randomDelay = (min, max) => new Promise(res => setTimeout(res, Math.floor(Math.random() * (max - min + 1) + min)));
 
-// --- เช็คช่วงเวลา Peak Time ---
 function isPeakTime() {
   const hour = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: 'numeric', hour12: false }).format(new Date()));
   return hour >= 8 || hour === 0; 
@@ -27,8 +26,8 @@ async function notifyDiscord(message, screenshotBuffer = null) {
   if (!DISCORD_WEBHOOK_URL) return;
   try {
     const form = new FormData();
-    form.append("content", `📢 **FB Scraper Alert**\n${message}`);
-    if (screenshotBuffer) form.append("file", screenshotBuffer, { filename: "alert.png", contentType: "image/png" });
+    form.append("content", `📢 **FB Scraper Report**\n${message}`);
+    if (screenshotBuffer) form.append("file", screenshotBuffer, { filename: "screen.png", contentType: "image/png" });
     await axios.post(DISCORD_WEBHOOK_URL, form, { headers: { ...form.getHeaders() }, timeout: 30000 });
   } catch (e) { log("❌", "Discord Notify Error"); }
 }
@@ -42,7 +41,7 @@ async function getRecentContents(sheets) {
 }
 
 async function runJob() {
-  log("🚀", "--- เริ่มงาน: Full Feature Mode ---");
+  log("🚀", "--- เริ่มงาน: ระบบกู้ชีพด้วยการจำลองเมาส์ (Human Click) ---");
   let browser;
   try {
     const rawAuth = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_CREDENTIALS;
@@ -52,6 +51,7 @@ async function runJob() {
     
     browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"] });
     const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 800 }); // กำหนดขนาดจอให้ชัวร์ก่อนกด
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0");
 
     if (COOKIES_JSON) {
@@ -63,35 +63,63 @@ async function runJob() {
     for (const url of GROUP_URLS) {
       log("🌐", `ตรวจสอบกลุ่ม: ${url}`);
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-      await randomDelay(7000, 10000); // รอโหลดหน้าแรกให้ชัวร์
+      await randomDelay(8000, 10000);
 
-      // 🔥 ฟีเจอร์: เจอ 0 แล้วหยุด + ส่งรูป
-      const initPostCount = await page.evaluate(() => document.querySelectorAll("div[role='article']").length);
-      if (initPostCount === 0) {
-        log("🚨", "หาโพสต์ไม่เจอ (0 โพสต์)! หยุดรันและส่งรูปแจ้งเตือน");
-        const screen = await page.screenshot();
-        await notifyDiscord(`🆘 ตรวจพบ 0 โพสต์ที่กลุ่ม: ${url}\nสันนิษฐานว่าติดหน้ากั้น/Cookie หลุด`, screen);
+      // --- 🖱️ STEP 1: ค้นหาปุ่มกู้ชีพ (Continue) ---
+      const continueBtn = await page.evaluateHandle(() => {
+        const keywords = ["Continue", "ดำเนินการต่อ", "ใช่", "ตกลง"];
+        const btns = Array.from(document.querySelectorAll('div[role="button"], span, a, button'));
+        return btns.find(b => keywords.some(k => b.innerText.includes(k)));
+      });
+
+      if (continueBtn.asElement()) {
+        log("🖱️", "ตรวจพบหน้ากั้น! กำลังจำลองเมาส์ไปกด Continue...");
+        const box = await continueBtn.asElement().boundingBox();
+        if (box) {
+          // ถ่ายรูป "ก่อนกด"
+          const beforeClick = await page.screenshot();
+          await notifyDiscord(`📸 ติดหน้ากั้นที่กลุ่ม: ${url}\nบอทกำลังพยายามกด Continue ให้...`, beforeClick);
+
+          // จำลองการเลื่อนเมาส์และกดแบบคน
+          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+          await page.mouse.down();
+          await randomDelay(150, 300); 
+          await page.mouse.up();
+          
+          log("⏳", "กดแล้ว รอโหลดหน้าใหม่ 12 วินาที...");
+          await randomDelay(12000, 15000);
+
+          // ถ่ายรูป "หลังกด" เพื่อดูว่าเปลี่ยนไปหน้าไหน
+          const afterClick = await page.screenshot();
+          await notifyDiscord(`📸 หลังพยายามกด Continue แล้ว หน้าจอเปลี่ยนเป็นแบบนี้ครับ:`, afterClick);
+        }
+      }
+
+      // --- 🔍 STEP 2: เช็คยอดโพสต์หลังกู้ชีพ ---
+      const initCount = await page.evaluate(() => document.querySelectorAll("div[role='article']").length);
+
+      if (initCount === 0) {
+        log("🚨", "กู้ชีพไม่สำเร็จ ยอดโพสต์ยังเป็น 0! หยุดรันทันที");
+        const finalError = await page.screenshot();
+        await notifyDiscord(`🆘 ยังมองเห็น 0 โพสต์ (พยายามกดแล้วไม่ผ่าน) ที่กลุ่ม: ${url}`, finalError);
         return; 
       }
 
+      log("✅", `พบโพสต์ ${initCount} รายการ ลุยงานต่อปกติ...`);
+
+      // --- 📑 ส่วนไถงานและกางปุ่ม (Expand & Scroll) ---
       for (let i = 1; i <= SCROLL_COUNT; i++) {
         await page.evaluate(() => window.scrollBy(0, 1000));
-        
-        // ฟีเจอร์: กางปุ่มทุกประเภท
         const clicked = await page.evaluate(async () => {
           const keywords = ["ดูเพิ่มเติม", "See more", "ความคิดเห็นเพิ่มเติม", "การตอบกลับ", "ดูเพิ่ม"];
           const btns = Array.from(document.querySelectorAll('div[role="button"], span')).filter(el => keywords.some(k => el.innerText.includes(k)));
           btns.forEach(b => b.click());
           return btns.length;
         });
-
         await randomDelay(2500, 3500);
-        const currentPosts = await page.$$eval("div[role='article']", (articles) => articles.map(a => a.innerText.trim()));
-        const newOnScreen = currentPosts.filter(p => p.length > 10 && !existingContents.has(p)).length;
-        log("📑", `รอบที่ ${i}/${SCROLL_COUNT}: [กางปุ่ม: ${clicked}] | [พบใหม่หน้าจอนี้: ${newOnScreen}] | [ซ้ำ: ${currentPosts.length - newOnScreen}]`);
+        log(" ↳", `รอบที่ ${i}/${SCROLL_COUNT}: [กางปุ่ม: ${clicked}]`);
       }
 
-      // ฟีเจอร์: ดึงข้อมูล + Clean ขยะ UI
       const finalPosts = await page.$$eval("div[role='article']", (articles) => {
         return articles.map(a => {
           const link = a.querySelector("a[href*='/posts/'], a[href*='/permalink/']")?.href.split('?')[0] || "";
@@ -114,18 +142,21 @@ async function runJob() {
       await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A:A`, valueInputOption: "RAW", insertDataOption: "INSERT_ROWS", requestBody: { values: allRows } });
       log("✅", `บันทึกข้อมูลใหม่ ${allRows.length} รายการ`);
     }
-  } catch (e) { log("💀", `Error: ${e.message}`); }
-  finally { if (browser) await browser.close(); log("🏁", "จบงาน"); }
+
+  } catch (e) { 
+    log("💀", `Error: ${e.message}`);
+    const errScreen = await page.screenshot().catch(() => null);
+    await notifyDiscord(`บอทพัง (Exception): ${e.message}`, errScreen);
+  } finally { if (browser) await browser.close(); log("🏁", "จบงานรอบนี้"); }
 }
 
 const app = express();
 app.get("/", (req, res) => res.send("Active"));
 app.listen(process.env.PORT || 8080, () => {
-  // ฟีเจอร์: Dynamic Schedule
   cron.schedule(process.env.CRON_SCHEDULE || "*/20 * * * *", () => {
     if (isPeakTime()) { runJob(); } 
     else if (new Date().getMinutes() < 20) { runJob(); } 
-    else { log("💤", "ช่วง Off-Peak: ข้ามรอบนี้"); }
+    else { log("💤", "Off-Peak: ข้ามรอบ"); }
   });
   if (process.env.RUN_ON_START === "true") runJob();
 });

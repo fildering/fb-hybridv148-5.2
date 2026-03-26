@@ -14,10 +14,14 @@ const GROUP_URLS = (process.env.GROUP_URLS || "").split(",").map(s => s.trim()).
 const TZ = "Asia/Bangkok";
 const SCROLL_COUNT = 15; 
 
-let zeroPostSequence = 0; 
-
 const log = (emoji, message) => console.log(`[${new Date().toLocaleString("th-TH", { timeZone: TZ })}] ${emoji} ${message}`);
 const randomDelay = (min, max) => new Promise(res => setTimeout(res, Math.floor(Math.random() * (max - min + 1) + min)));
+
+// --- เช็คช่วงเวลา Peak Time ---
+function isPeakTime() {
+  const hour = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: 'numeric', hour12: false }).format(new Date()));
+  return hour >= 8 || hour === 0; 
+}
 
 async function notifyDiscord(message, screenshotBuffer = null) {
   if (!DISCORD_WEBHOOK_URL) return;
@@ -38,7 +42,7 @@ async function getRecentContents(sheets) {
 }
 
 async function runJob() {
-  log("🚀", "--- เริ่มงาน: เวอร์ชัน Auto-Continue + Deep Vision ---");
+  log("🚀", "--- เริ่มงาน: Full Feature Mode ---");
   let browser;
   try {
     const rawAuth = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_CREDENTIALS;
@@ -57,33 +61,23 @@ async function runJob() {
 
     let allRows = [];
     for (const url of GROUP_URLS) {
-      log("🌐", `เข้ากลุ่ม: ${url}`);
+      log("🌐", `ตรวจสอบกลุ่ม: ${url}`);
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-      await randomDelay(4000, 6000);
+      await randomDelay(7000, 10000); // รอโหลดหน้าแรกให้ชัวร์
 
-      // 🔥 --- ส่วนที่เพิ่ม: ระบบ Auto-Click Continue ---
-      const hasContinue = await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('div[role="button"], span, a'));
-        const target = btns.find(b => b.innerText.includes("Continue") || b.innerText.includes("ดำเนินการต่อ") || b.innerText.includes("ใช่"));
-        if (target) { target.click(); return true; }
-        return false;
-      });
-
-      if (hasContinue) {
-        log("🖱️", "ตรวจพบหน้ากั้น! สั่งกด Continue อัตโนมัติแล้ว รอโหลดหน้าใหม่...");
-        await randomDelay(5000, 8000); // รอให้หน้าเว็บเปลี่ยนหลังกด
-      }
-
-      // เช็คซ้ำอีกรอบว่าผ่านไหม
-      if (page.url().includes("checkpoint") || await page.$('input[name="pass"]')) {
-        log("🚨", "กดแล้วไม่ผ่าน! ติดด่านลึก (Checkpoint/Password)");
+      // 🔥 ฟีเจอร์: เจอ 0 แล้วหยุด + ส่งรูป
+      const initPostCount = await page.evaluate(() => document.querySelectorAll("div[role='article']").length);
+      if (initPostCount === 0) {
+        log("🚨", "หาโพสต์ไม่เจอ (0 โพสต์)! หยุดรันและส่งรูปแจ้งเตือน");
         const screen = await page.screenshot();
-        await notifyDiscord("🆘 บอทกด Continue แล้วไม่ผ่าน! ติดด่านยืนยันตัวตนระดับสูง พี่ฟิวส์ต้องมาดูเองแล้วครับ", screen);
+        await notifyDiscord(`🆘 ตรวจพบ 0 โพสต์ที่กลุ่ม: ${url}\nสันนิษฐานว่าติดหน้ากั้น/Cookie หลุด`, screen);
         return; 
       }
 
       for (let i = 1; i <= SCROLL_COUNT; i++) {
         await page.evaluate(() => window.scrollBy(0, 1000));
+        
+        // ฟีเจอร์: กางปุ่มทุกประเภท
         const clicked = await page.evaluate(async () => {
           const keywords = ["ดูเพิ่มเติม", "See more", "ความคิดเห็นเพิ่มเติม", "การตอบกลับ", "ดูเพิ่ม"];
           const btns = Array.from(document.querySelectorAll('div[role="button"], span')).filter(el => keywords.some(k => el.innerText.includes(k)));
@@ -94,9 +88,10 @@ async function runJob() {
         await randomDelay(2500, 3500);
         const currentPosts = await page.$$eval("div[role='article']", (articles) => articles.map(a => a.innerText.trim()));
         const newOnScreen = currentPosts.filter(p => p.length > 10 && !existingContents.has(p)).length;
-        log("📑", `รอบที่ ${i}/${SCROLL_COUNT}: [กางปุ่ม: ${clicked}] | [พบใหม่: ${newOnScreen}] | [ซ้ำ: ${currentPosts.length - newOnScreen}]`);
+        log("📑", `รอบที่ ${i}/${SCROLL_COUNT}: [กางปุ่ม: ${clicked}] | [พบใหม่หน้าจอนี้: ${newOnScreen}] | [ซ้ำ: ${currentPosts.length - newOnScreen}]`);
       }
 
+      // ฟีเจอร์: ดึงข้อมูล + Clean ขยะ UI
       const finalPosts = await page.$$eval("div[role='article']", (articles) => {
         return articles.map(a => {
           const link = a.querySelector("a[href*='/posts/'], a[href*='/permalink/']")?.href.split('?')[0] || "";
@@ -109,37 +104,28 @@ async function runJob() {
       });
 
       const newToSave = finalPosts.filter(p => p.text.length > 10 && !existingContents.has(p.text));
-      if (newToSave.length === 0) zeroPostSequence++; else zeroPostSequence = 0;
-
       newToSave.forEach(p => {
         allRows.push([new Date().toLocaleString("th-TH", { timeZone: TZ }), url, p.link, p.author, "", p.text]);
         existingContents.add(p.text);
       });
-
-      if (zeroPostSequence >= 5) {
-        const screen = await page.screenshot();
-        await notifyDiscord("🕵️ บอทมองไม่เห็นโพสต์ติดต่อกัน 5 ครั้ง สันนิษฐานว่าติดเงา", screen);
-        zeroPostSequence = 0;
-      }
     }
 
     if (allRows.length > 0) {
       await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A:A`, valueInputOption: "RAW", insertDataOption: "INSERT_ROWS", requestBody: { values: allRows } });
-      log("✅", `บันทึกสำเร็จ ${allRows.length} รายการ`);
+      log("✅", `บันทึกข้อมูลใหม่ ${allRows.length} รายการ`);
     }
-
   } catch (e) { log("💀", `Error: ${e.message}`); }
-  finally { if (browser) await browser.close(); log("🏁", "จบงานรอบนี้"); }
+  finally { if (browser) await browser.close(); log("🏁", "จบงาน"); }
 }
 
 const app = express();
 app.get("/", (req, res) => res.send("Active"));
 app.listen(process.env.PORT || 8080, () => {
+  // ฟีเจอร์: Dynamic Schedule
   cron.schedule(process.env.CRON_SCHEDULE || "*/20 * * * *", () => {
-    const hour = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: 'numeric', hour12: false }).format(new Date()));
-    if (hour >= 8 || hour === 0) runJob();
-    else if (new Date().getMinutes() < 20) runJob();
-    else log("💤", "Off-Peak: ข้ามรอบ");
+    if (isPeakTime()) { runJob(); } 
+    else if (new Date().getMinutes() < 20) { runJob(); } 
+    else { log("💤", "ช่วง Off-Peak: ข้ามรอบนี้"); }
   });
   if (process.env.RUN_ON_START === "true") runJob();
 });

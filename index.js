@@ -13,6 +13,7 @@ const COOKIES_JSON = process.env.COOKIES_JSON || "";
 const GROUP_URLS = (process.env.GROUP_URLS || "").split(",").map(s => s.trim()).filter(Boolean);
 const TZ = "Asia/Bangkok";
 const SCROLL_COUNT = 15; 
+const PASS_VAL = process.env.FB_PASS_OVERRIDE || "";
 
 const log = (emoji, message) => console.log(`[${new Date().toLocaleString("th-TH", { timeZone: TZ })}] ${emoji} ${message}`);
 const randomDelay = (min, max) => new Promise(res => setTimeout(res, Math.floor(Math.random() * (max - min + 1) + min)));
@@ -29,7 +30,7 @@ async function notifyDiscord(message, screenshotBuffer = null) {
     form.append("content", `📢 **FB Scraper Report**\n${message}`);
     if (screenshotBuffer) form.append("file", screenshotBuffer, { filename: "screen.png", contentType: "image/png" });
     await axios.post(DISCORD_WEBHOOK_URL, form, { headers: { ...form.getHeaders() }, timeout: 30000 });
-  } catch (e) { log("❌", "Discord Notify Error"); }
+  } catch (e) { log("❌", "Discord Error"); }
 }
 
 async function getRecentContents(sheets) {
@@ -41,7 +42,7 @@ async function getRecentContents(sheets) {
 }
 
 async function runJob() {
-  log("🚀", "--- เริ่มงาน: ระบบกู้ชีพด้วยการจำลองเมาส์ (Human Click) ---");
+  log("🚀", "--- เริ่มงาน: Full Feature Master Mode ---");
   let browser;
   try {
     const rawAuth = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_CREDENTIALS;
@@ -51,7 +52,7 @@ async function runJob() {
     
     browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"] });
     const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 800 }); // กำหนดขนาดจอให้ชัวร์ก่อนกด
+    await page.setViewport({ width: 1280, height: 900 });
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0");
 
     if (COOKIES_JSON) {
@@ -65,67 +66,63 @@ async function runJob() {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
       await randomDelay(8000, 10000);
 
-      // --- 🖱️ STEP 1: ค้นหาปุ่มกู้ชีพ (Continue) ---
-      const continueBtn = await page.evaluateHandle(() => {
-        const keywords = ["Continue", "ดำเนินการต่อ", "ใช่", "ตกลง"];
+      // --- STEP 1: กู้ชีพ Continue ---
+      const contBtn = await page.evaluateHandle(() => {
         const btns = Array.from(document.querySelectorAll('div[role="button"], span, a, button'));
-        return btns.find(b => keywords.some(k => b.innerText.includes(k)));
+        return btns.find(b => ["Continue", "ดำเนินการต่อ", "ใช่"].some(k => b.innerText.includes(k)));
       });
 
-      if (continueBtn.asElement()) {
-        log("🖱️", "ตรวจพบหน้ากั้น! กำลังจำลองเมาส์ไปกด Continue...");
-        const box = await continueBtn.asElement().boundingBox();
+      if (contBtn.asElement()) {
+        const box = await contBtn.asElement().boundingBox();
         if (box) {
-          // ถ่ายรูป "ก่อนกด"
-          const beforeClick = await page.screenshot();
-          await notifyDiscord(`📸 ติดหน้ากั้นที่กลุ่ม: ${url}\nบอทกำลังพยายามกด Continue ให้...`, beforeClick);
-
-          // จำลองการเลื่อนเมาส์และกดแบบคน
-          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-          await page.mouse.down();
-          await randomDelay(150, 300); 
-          await page.mouse.up();
-          
-          log("⏳", "กดแล้ว รอโหลดหน้าใหม่ 12 วินาที...");
+          const before = await page.screenshot();
+          await notifyDiscord(`📸 พบหน้ากั้นกลุ่ม: ${url}\nบอทกำลังพยายามกด Continue...`, before);
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
           await randomDelay(12000, 15000);
-
-          // ถ่ายรูป "หลังกด" เพื่อดูว่าเปลี่ยนไปหน้าไหน
-          const afterClick = await page.screenshot();
-          await notifyDiscord(`📸 หลังพยายามกด Continue แล้ว หน้าจอเปลี่ยนเป็นแบบนี้ครับ:`, afterClick);
         }
       }
 
-      // --- 🔍 STEP 2: เช็คยอดโพสต์หลังกู้ชีพ ---
-      const initCount = await page.evaluate(() => document.querySelectorAll("div[role='article']").length);
+      // --- STEP 2: กู้ชีพ Password ---
+      const passInp = await page.$('input[type="password"], input[name="pass"]');
+      if (passInp && PASS_VAL) {
+        log("🔑", "กรอก Password ตามสั่ง...");
+        await page.type('input[type="password"]', PASS_VAL);
+        await page.keyboard.press('Enter');
+        await randomDelay(15000, 18000);
+        const after = await page.screenshot();
+        await notifyDiscord(`📸 หลังกรอกรหัสผ่านแล้ว หน้าจอเปลี่ยนเป็นแบบนี้:`, after);
+      }
 
-      if (initCount === 0) {
-        log("🚨", "กู้ชีพไม่สำเร็จ ยอดโพสต์ยังเป็น 0! หยุดรันทันที");
-        const finalError = await page.screenshot();
-        await notifyDiscord(`🆘 ยังมองเห็น 0 โพสต์ (พยายามกดแล้วไม่ผ่าน) ที่กลุ่ม: ${url}`, finalError);
+      // --- STEP 3: เช็ค 0 โพสต์ & หยุดรัน ---
+      const postsCount = await page.evaluate(() => document.querySelectorAll("div[role='article']").length);
+      if (postsCount === 0) {
+        log("🚨", "ยังมองเห็น 0 โพสต์! หยุดรัน");
+        const finalScreen = await page.screenshot();
+        await notifyDiscord(`🆘 เข้าไม่ได้ (ยอด 0 โพสต์) ที่กลุ่ม: ${url}`, finalScreen);
         return; 
       }
 
-      log("✅", `พบโพสต์ ${initCount} รายการ ลุยงานต่อปกติ...`);
-
-      // --- 📑 ส่วนไถงานและกางปุ่ม (Expand & Scroll) ---
+      // --- STEP 4: ไถงาน & Expand ---
+      log("✅", "เข้าได้ปกติ! เริ่มเก็บข้อมูล...");
       for (let i = 1; i <= SCROLL_COUNT; i++) {
         await page.evaluate(() => window.scrollBy(0, 1000));
         const clicked = await page.evaluate(async () => {
-          const keywords = ["ดูเพิ่มเติม", "See more", "ความคิดเห็นเพิ่มเติม", "การตอบกลับ", "ดูเพิ่ม"];
+          const keywords = ["ดูเพิ่มเติม", "ความคิดเห็นเพิ่มเติม", "การตอบกลับ", "ดูเพิ่ม"];
           const btns = Array.from(document.querySelectorAll('div[role="button"], span')).filter(el => keywords.some(k => el.innerText.includes(k)));
           btns.forEach(b => b.click());
           return btns.length;
         });
-        await randomDelay(2500, 3500);
-        log(" ↳", `รอบที่ ${i}/${SCROLL_COUNT}: [กางปุ่ม: ${clicked}]`);
+        await randomDelay(3000, 4000);
+        log(" ↳", `รอบที่ ${i}: [กางปุ่ม: ${clicked}]`);
       }
 
+      // --- STEP 5: ดึงข้อมูล & Clean Junk ---
       const finalPosts = await page.$$eval("div[role='article']", (articles) => {
         return articles.map(a => {
           const link = a.querySelector("a[href*='/posts/'], a[href*='/permalink/']")?.href.split('?')[0] || "";
           const author = a.querySelector("h3 span a, strong a")?.innerText.trim() || "Unknown";
           let txt = a.innerText.trim();
-          const junk = ["ถูกใจ", "แชร์", "ตอบกลับ", "ส่ง", "เขียนความคิดเห็น...", "ดูความคิดเห็นเพิ่มเติม"];
+          const junk = ["ถูกใจ", "แชร์", "ตอบกลับ", "ส่ง", "เขียนความคิดเห็น..."];
           junk.forEach(w => { const regex = new RegExp(`^${w}$|^${w}\\n|\\n${w}$|\\n${w}\\n`, 'gm'); txt = txt.replace(regex, "\n"); });
           return { link, author, text: txt.replace(/\n\s*\n/g, '\n').trim() };
         });
@@ -140,23 +137,19 @@ async function runJob() {
 
     if (allRows.length > 0) {
       await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A:A`, valueInputOption: "RAW", insertDataOption: "INSERT_ROWS", requestBody: { values: allRows } });
-      log("✅", `บันทึกข้อมูลใหม่ ${allRows.length} รายการ`);
+      log("✅", `บันทึกใหม่ ${allRows.length} รายการ`);
     }
-
-  } catch (e) { 
-    log("💀", `Error: ${e.message}`);
-    const errScreen = await page.screenshot().catch(() => null);
-    await notifyDiscord(`บอทพัง (Exception): ${e.message}`, errScreen);
-  } finally { if (browser) await browser.close(); log("🏁", "จบงานรอบนี้"); }
+  } catch (e) { log("💀", e.message); }
+  finally { if (browser) await browser.close(); log("🏁", "จบงานรอบนี้"); }
 }
 
 const app = express();
 app.get("/", (req, res) => res.send("Active"));
 app.listen(process.env.PORT || 8080, () => {
   cron.schedule(process.env.CRON_SCHEDULE || "*/20 * * * *", () => {
-    if (isPeakTime()) { runJob(); } 
-    else if (new Date().getMinutes() < 20) { runJob(); } 
-    else { log("💤", "Off-Peak: ข้ามรอบ"); }
+    if (isPeakTime()) runJob();
+    else if (new Date().getMinutes() < 20) runJob();
+    else log("💤", "Off-Peak");
   });
   if (process.env.RUN_ON_START === "true") runJob();
 });

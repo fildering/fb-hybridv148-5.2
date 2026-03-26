@@ -20,7 +20,7 @@ async function runJob() {
     const auth = new google.auth.GoogleAuth({ credentials: JSON.parse(rawAuth), scopes: ["https://www.googleapis.com/auth/spreadsheets"] });
     const sheets = google.sheets({ version: "v4", auth });
 
-    // 🔥 เชื่อมต่อผ่าน WebSocket เพื่อส่งภาพออกหน้าจอ /debugger (Port 3000)
+    // 🔥 เชื่อมต่อไปยังพอร์ต 3000 (หน้าจอ Docker)
     browser = await puppeteer.connect({
       browserWSEndpoint: `ws://localhost:3000?--window-size=1280,900`,
       defaultViewport: null
@@ -28,7 +28,6 @@ async function runJob() {
 
     const page = await browser.newPage();
     
-    // ใส่ Cookies ถ้ามี
     if (COOKIES_JSON) {
       try {
         const cookies = JSON.parse(COOKIES_JSON);
@@ -40,17 +39,16 @@ async function runJob() {
       log("🌐", `กำลังตรวจสอบกลุ่ม: ${url}`);
       await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
-      // เช็คว่าติดหน้ากั้น (0 โพสต์) ไหม
       const postsCount = await page.evaluate(() => document.querySelectorAll("div[role='article']").length);
       
       if (postsCount === 0) {
-        log("🛑", "ตรวจพบหน้ากั้น! บอทจะจอดรอ 2 นาที ให้พี่รีโมทเข้าไปกดใน /debugger ได้เลย...");
+        log("🛑", "ตรวจพบหน้ากั้น! พี่รีโมทเข้าหน้าหลักเพื่อกดให้ผ่านได้เลย (บอทจะรอ 2 นาที)...");
         // จอดรอให้พี่ฟิวส์จัดการ (จิ้มเองในจอรีโมท)
         await new Promise(res => setTimeout(res, 120000)); 
       }
 
-      log("✅", "เข้าหน้ากลุ่มได้แล้ว! เริ่มดูดข้อมูล...");
-      // ... (ส่วนการ Scroll และดึงข้อมูลลง Sheets ใส่ต่อตรงนี้ได้เลย) ...
+      log("✅", "พร้อมทำงานต่อ...");
+      // ... (โค้ดดึงข้อมูลลง Sheets เหมือนเดิม) ...
     }
 
   } catch (e) { 
@@ -64,29 +62,17 @@ async function runJob() {
 // -------------------- Express Server --------------------
 const app = express();
 
-// หน้าแรกเช็คสถานะ
+// รันหน้าสถานะไว้ที่พอร์ต 8080 เพื่อไม่ให้ทับกับหน้าจอรีโมท (Port 3000)
 app.get("/", (req, res) => {
-  res.send(`
-    <body style="font-family:sans-serif; text-align:center; padding-top:50px;">
-      <h1>🤖 Bot Status: Active</h1>
-      <p>เข้าดูหน้าจอรีโมทเพื่อกดรหัสผ่าน/OTP ได้ที่ปุ่มด้านล่าง:</p>
-      <a href="/debugger" style="padding:10px 20px; background:#007bff; color:white; text-decoration:none; border-radius:5px;">ไปหน้าจอรีโมท (Debugger)</a>
-    </body>
-  `);
+  res.send("Bot Control System is Running on Port 8080");
 });
 
-// 🔥 ล็อค Port ให้ตรงกับ Railway Variables (3000)
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, "0.0.0.0", () => {
-  log("📶", `Express Server รันอยู่ที่ Port: ${PORT}`);
+// 🔥 บังคับให้ Express รันที่พอร์ต 8080 เสมอ
+app.listen(8080, "0.0.0.0", () => {
+  log("📶", "Express Server แยกไปรันที่ Port: 8080 (หลบทางให้หน้าจอรีโมท)");
   
-  // ตั้งตารางเวลา (ทุก 20 นาที)
-  cron.schedule("*/20 * * * *", () => {
-    runJob();
-  });
+  cron.schedule("*/20 * * * *", runJob);
 
-  // รันทันทีถ้าตั้ง RUN_ON_START = true
   if (process.env.RUN_ON_START === "true") {
     runJob();
   }

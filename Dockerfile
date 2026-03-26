@@ -1,12 +1,11 @@
-FROM ghcr.io/browserless/chromium:latest
+# เปลี่ยนมาใช้ v1 ที่มีหน้า Dashboard ให้รีโมทจอได้
+FROM browserless/chrome:latest
 
-ENV ENABLE_DEBUGGER=true
 ENV PORT=3000
+# ยืดเวลา Session ให้จอไม่ดับ เผื่อใช้เวลาแก้ Captcha นาน (10 นาที)
+ENV CONNECTION_TIMEOUT=600000 
 
-# 🔥 จุดแก้บัค: สร้างไฟล์ .env เปล่าๆ หลอกระบบหน้าจอไม่ให้มันแครช
-RUN touch /usr/src/app/.env
-
-# แยกห้องให้บอทมาอยู่ที่โฟลเดอร์ /bot (จะได้ไม่ทับระบบหน้าจอ)
+# แยกห้องให้บอทมาอยู่ที่โฟลเดอร์ /bot
 WORKDIR /bot
 COPY package*.json ./
 RUN npm install
@@ -19,5 +18,4 @@ RUN chmod +x start.sh
 
 EXPOSE 3000
 
-# สั่งรันไฟล์ start.sh
 CMD ["./start.sh"]
